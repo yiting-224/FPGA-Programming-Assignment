@@ -108,6 +108,11 @@ Refiner::Key attempt(const Hypergraph& H, const Topology& T, const Params& prm, 
         part = Rl->part();
         if (l > 0) part = hier.projectDown(l, part);
     }
+    if (R.key().first > 0) {
+        R.repair(rng, deadline + 2.0, timer);
+        R.greedyRefine(rng, false, prm.refinePasses, deadline + 2.0, timer);
+        logf("  repair: viol=%lld t=%.1f\n", R.key().first, timer.elapsed());
+    }
     out = R.part();
     return R.key();
 }

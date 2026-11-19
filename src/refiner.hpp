@@ -30,7 +30,7 @@ public:
         return load1_[b] + H_.w1[v] <= T_.cap1[b] && load2_[b] + H_.w2[v] <= T_.cap2[b];
     }
 
-    long long objective() const { return cost_ + lambdaIO_ * overflow_; }
+    long long objective() const { return cost_ + lambdaIO_ * overflow_ + pinPen_ * pinBad_; }
     long long cost() const { return cost_; }            // TLC incl. big penalties
     long long bad() const { return bad_; }              // signals over missing links
     long long overflow() const { return overflow_; }    // total I/O overflow
@@ -61,6 +61,10 @@ public:
     using Key = std::pair<long long, long long>;
     Key key() const { return {bad_ + overflow_, cost_ - (long long)T_.big * bad_}; }
 
+    // Targeted repair of link / I/O violations: nodes involved in a
+    // violation try every FPGA (and swaps when the target is full).
+    void repair(Rng& rng, double deadline, const Timer& timer);
+
     bool isBoundary(int v);
     void collectCandidates(int v, std::vector<int>& out);
 
@@ -84,6 +88,18 @@ private:
     }
     void incCnt(int e, int f);
     void decCnt(int e, int f);
+
+    template <class F>
+    void forEachOccCnt(int e, F&& fn) const {
+        const int off = pcOff_[e];
+        if (dense_[e]) {
+            for (int f = 0; f < T_.K; ++f)
+                if (pc_[off + f] > 0) fn(f, pc_[off + f]);
+        } else {
+            const int u = nUsed_[e];
+            for (int i = 0; i < u; ++i) fn(pc_[off + 2 * i], pc_[off + 2 * i + 1]);
+        }
+    }
 
     template <class F>
     void forEachOcc(int e, F&& fn) const {
@@ -126,6 +142,11 @@ private:
     std::vector<long long> load1_, load2_;
     long long cost_ = 0;
     long long bad_ = 0;
+    // Sum over sinks placed on an FPGA without a link to their source FPGA
+    // (weighted). It gives local search a gradient towards removing a link
+    // violation one sink at a time.
+    long long pinBad_ = 0;
+    long long pinPen_ = 1;
     long long overflow_ = 0;
     std::vector<char> unlinked_;
 

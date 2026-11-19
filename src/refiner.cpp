@@ -1,6 +1,7 @@
 #include "refiner.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <numeric>
 
@@ -12,6 +13,8 @@ constexpr int kCandNetLimit = 32;
 
 Refiner::Refiner(const Hypergraph& H, const Topology& T) : H_(H), T_(T) {
     lambdaIO_ = T.big;
+    pinPen_ = 20LL * T.maxCost;
+    if (const char* e = std::getenv("PARTITIONER_PINPEN")) pinPen_ = std::atoll(e);
     const int K = T.K;
     pcOff_.assign(H.m, 0);
     dense_.assign(H.m, 0);
@@ -98,10 +101,12 @@ void Refiner::init(const std::vector<int>& part) {
     }
     cost_ = 0;
     bad_ = 0;
+    pinBad_ = 0;
     for (int e = 0; e < H_.m; ++e) {
         for (int i = H_.sinkOff[e]; i < H_.sinkOff[e + 1]; ++i) incCnt(e, part_[H_.sinks[i]]);
         const int s = part_[H_.netSrc[e]];
         const long long w = H_.netW[e];
+        forEachOccCnt(e, [&](int f, int c) { pinBad_ += w * c * unlinked_[s * K + f]; });
         const int nR = occ_[e] - (cnt(e, s) > 0);
         if (nR > 0) {
             io_[s] += w;
@@ -124,7 +129,7 @@ long long Refiner::eval(int v, int b) {
     const int K = T_.K;
     const int* D = T_.D.data();
     const char* U = unlinked_.data();
-    long long dc = 0, dbad = 0;
+    long long dc = 0, dbad = 0, dpin = 0;
     for (int i = H_.incOff[v]; i < H_.incOff[v + 1]; ++i) {
         const int e = H_.inc[i];
         const long long w = H_.netW[e];
@@ -146,6 +151,11 @@ long long Refiner::eval(int v, int b) {
             });
             dc += w * (newC - oldC);
             dbad += w * (newU - oldU);
+            if (newU != 0 || oldU != 0) {
+                long long pu = 0;
+                forEachOccCnt(e, [&](int f, int c) { pu += (long long)c * (Ub[f] - Ua[f]); });
+                dpin += w * pu;
+            }
             if (oldNon > 0 && newNon > 0) {
                 if (ca == 0) addIO(a, -w);
                 if (cb == 0) addIO(b, w);
@@ -164,6 +174,7 @@ long long Refiner::eval(int v, int b) {
             const int ca = cnt(e, a), cb = cnt(e, b);
             const bool remA = (ca == 1 && a != s);
             const bool addB = (cb == 0 && b != s);
+            dpin += w * (U[s * K + b] - U[s * K + a]);
             if (remA || addB) {
                 if (addB) {
                     dc += w * D[s * K + b];
@@ -199,6 +210,7 @@ long long Refiner::eval(int v, int b) {
     if (COMMIT) {
         cost_ += dc;
         bad_ += dbad;
+        pinBad_ += dpin;
         overflow_ += dov;
         part_[v] = b;
         load1_[a] -= H_.w1[v];
@@ -206,7 +218,7 @@ long long Refiner::eval(int v, int b) {
         load1_[b] += H_.w1[v];
         load2_[b] += H_.w2[v];
     }
-    return dc + lambdaIO_ * dov;
+    return dc + lambdaIO_ * dov + pinPen_ * dpin;
 }
 
 template long long Refiner::eval<true>(int, int);
@@ -525,4 +537,97 @@ void Refiner::anneal(Rng& rng, double deadline, const Timer& timer) {
     }
     checkBest();
     if (!dirty.empty()) init(bestPart);
+}
+
+void Refiner::repair(Rng& rng, double deadline, const Timer& timer) {
+    const int K = T_.K;
+    std::vector<std::vector<int>> members(K);
+    std::vector<int> S;
+    std::vector<char> inS(H_.n, 0);
+    for (int round = 0; round < 200 && (bad_ > 0 || overflow_ > 0); ++round) {
+        if (timer.elapsed() > deadline) break;
+        for (auto& l : members) l.clear();
+        for (int v = 0; v < H_.n; ++v) members[part_[v]].push_back(v);
+        S.clear();
+        auto add = [&](int v) {
+            if (!inS[v]) {
+                inS[v] = 1;
+                S.push_back(v);
+            }
+        };
+        if (bad_ > 0) {
+            for (int e = 0; e < H_.m; ++e) {
+                const int s = part_[H_.netSrc[e]];
+                bool viol = false;
+                forEachOcc(e, [&](int f) {
+                    if (unlinked_[s * K + f]) viol = true;
+                });
+                if (!viol) continue;
+                add(H_.netSrc[e]);
+                for (int i = H_.sinkOff[e]; i < H_.sinkOff[e + 1]; ++i) {
+                    const int t = H_.sinks[i];
+                    if (unlinked_[s * K + part_[t]]) add(t);
+                }
+            }
+        }
+        if (overflow_ > 0) {
+            for (int f = 0; f < K; ++f) {
+                if (io_[f] <= T_.ioLim[f]) continue;
+                int taken = 0;
+                for (int tries = 0; tries < 4000 && taken < 1000 && !members[f].empty(); ++tries) {
+                    const int v = members[f][rng.below((uint32_t)members[f].size())];
+                    if (isBoundary(v)) {
+                        add(v);
+                        ++taken;
+                    }
+                }
+            }
+        }
+        for (int v : S) inS[v] = 0;
+        rng.shuffle(S);
+        bool improved = false;
+        for (size_t idx = 0; idx < S.size(); ++idx) {
+            if ((idx & 63) == 0 && timer.elapsed() > deadline) break;
+            const int v = S[idx];
+            const int a = part_[v];
+            long long best = 0;
+            int bb = -1, bu = -1;
+            for (int b = 0; b < K; ++b) {
+                if (b == a) continue;
+                if (capacityOk(v, b)) {
+                    const long long d = delta(v, b);
+                    if (d < best) {
+                        best = d;
+                        bb = b;
+                        bu = -1;
+                    }
+                    continue;
+                }
+                const auto& mb = members[b];
+                if (mb.empty()) continue;
+                for (int t = 0; t < 12; ++t) {
+                    const int u = mb[rng.below((uint32_t)mb.size())];
+                    if (part_[u] != b) continue;
+                    if (load1_[b] - H_.w1[u] + H_.w1[v] > T_.cap1[b] || load2_[b] - H_.w2[u] + H_.w2[v] > T_.cap2[b])
+                        continue;
+                    if (load1_[a] - H_.w1[v] + H_.w1[u] > T_.cap1[a] || load2_[a] - H_.w2[v] + H_.w2[u] > T_.cap2[a])
+                        continue;
+                    const long long d1 = apply(v, b);
+                    const long long d2 = delta(u, a);
+                    apply(v, a);
+                    if (d1 + d2 < best) {
+                        best = d1 + d2;
+                        bb = b;
+                        bu = u;
+                    }
+                }
+            }
+            if (bb >= 0) {
+                apply(v, bb);
+                if (bu >= 0) apply(bu, a);
+                improved = true;
+            }
+        }
+        if (!improved) break;
+    }
 }

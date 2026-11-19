@@ -52,9 +52,12 @@ the number of nets incident to the moved node.</p>
 <p>For a net <i>e</i> with weight <i>w(e)</i>, source FPGA <i>s</i> and set <i>O(e)</i> of FPGAs holding at least
 one sink, the cost is <i>w(e)·Σ<sub>f∈O(e)\{s}</sub> D(s,f)</i>, and if <i>O(e)\{s}</i> is non-empty the net uses
 <i>w(e)</i> I/O pins on <i>s</i> and on every FPGA of <i>O(e)\{s}</i>. The optimiser minimises</p>
-<div class="eq">J = Σ<sub>e</sub> w(e)·Σ<sub>f∈O(e)\{s}</sub> D(s,f) + λ·Σ<sub>f</sub> max(0, IO(f) − IOlimit(f))</div>
+<div class="eq">J = Σ<sub>e</sub> w(e)·Σ<sub>f∈O(e)\{s}</sub> D(s,f) + λ·Σ<sub>f</sub> max(0, IO(f) − IOlimit(f)) + μ·Σ<sub>e</sub> w(e)·#{sinks of e on FPGAs not linked to s}</div>
 <p>where <i>D(a,b)</i> is the link cost and, for an <b>unlinked</b> pair, a large penalty
-<i>B</i> = max(10000, 1000·max cost). λ = <i>B</i> as well. The constraints are therefore handled as follows:</p>
+<i>B</i> = max(10000, 1000·max cost). λ = <i>B</i> as well. The last term (μ = 20·max cost) counts every
+<i>sink</i> placed on an unlinked FPGA. Without it, a violation caused by e.g. 20 sinks of one net on the same
+unlinked FPGA disappears only when all 20 have moved, so single moves see no improvement; with it every step of the
+evacuation is rewarded. The constraints are therefore handled as follows:</p>
 <ul>
   <li><b>Capacity</b> (both node types) is a <i>hard</i> constraint: a move is only applied if the target FPGA has
   room; when it has not, the annealer tries a <i>swap</i> instead (Section 4.2).</li>
@@ -127,6 +130,9 @@ simulated annealing [3] embedded in a multilevel framework [4]:</p>
   <li>The best state (lexicographic key of Section 2) is tracked lazily: only the nodes moved since the last new best
   are recorded, so saving a new best costs time proportional to the number of moves made since the previous one.</li>
 </ol>
+<p><b>Repair.</b> If an attempt ends with a violation, a repair phase visits the nodes involved (sinks on unlinked
+FPGAs and their sources, boundary nodes of FPGAs with I/O overflow), tries every FPGA and, for full FPGAs, swaps with
+sampled nodes, and applies every move that lowers <i>J</i>.</p>
 <p>Swap moves turned out to be essential: in public1 about 98 % of single moves are blocked by capacity, and adding
 swaps alone reduced the annealed TLC from 1377 to 238.</p>
 
@@ -144,6 +150,27 @@ The program is deterministic apart from thread timing.</p>
 <p>Machine used for the experiments: 4-core Linux container, g++ 13.3, <code>-O3</code>. TLC values were verified
 with the provided checker (all solutions legal).</p>
 <!--RESULTS-->
+<h3>Development history (ablation)</h3>
+<p>The table shows how each component changed the result during development (single run, time limit in brackets;
+the numbers are indicative because the annealer is randomised).</p>
+<table>
+<tr><th class="l">Version</th><th>public1</th><th>public3</th><th>public5</th></tr>
+<tr><td class="l">multilevel partitioning + greedy refinement</td><td>2368</td><td>18211</td><td>93949</td></tr>
+<tr><td class="l">+ V-cycles, flat SA without swaps (20 s / 20 s / 90 s)</td><td>1377</td><td>14567</td><td>89162</td></tr>
+<tr><td class="l">+ swap moves in SA (20 s / 60 s / 90 s)</td><td>238</td><td>11636</td><td>86809</td></tr>
+<tr><td class="l">+ annealing on one coarse level, then finest (60 s / 90 s)</td><td>–</td><td>9643</td><td>71401</td></tr>
+<tr><td class="l">+ multilevel annealing, coarse-weighted, hotter (60 s / 120 s)</td><td>–</td><td>9506</td><td>52106</td></tr>
+<tr><td class="l">+ parallel multi-start, diversified parameters (final)</td><td colspan="3" style="text-align:center">see table above</td></tr>
+</table>
+
+<h3>Robustness tests</h3>
+<p>Besides the public cases the program was tested on (i) the example of the assignment text, (ii) a K = 1
+instance, (iii) public3 with only the 166 links used by one of our solutions (legal, TLC 10384 in 40 s) and (iv) the
+same with every I/O limit lowered to the maximum I/O usage of that solution (775): this instance is legal
+only for very few placements; before the per-sink penalty term the program got stuck with 2 violations, afterwards 3
+of 4 workers found legal solutions. <b>Limitation:</b> on a 4×8 mesh topology (each FPGA linked only to its grid
+neighbours) with public3's netlist no legal solution was found; nets with up to 99 sinks would have to fit into an
+FPGA and its at most four neighbours, and it is unclear whether that instance is feasible at all.</p>
 
 <h2>6. Complexity</h2>
 <p>Let <i>P</i> be the number of pins. Parsing, coarsening (one level) and contraction run in
