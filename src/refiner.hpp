@@ -1,6 +1,7 @@
 // Incremental partition state and move-based refinement.
 #pragma once
 
+#include <cstdlib>
 #include <utility>
 #include <vector>
 
@@ -108,6 +109,11 @@ private:
     const Topology& T_;
     long long lambdaIO_;
     double tempScale_ = 0.3;
+
+public:
+    bool randTargets_ = std::getenv("NO_RT") == nullptr;
+
+private:
 
     std::vector<int> part_;
     std::vector<int> pcOff_;

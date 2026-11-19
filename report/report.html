@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Topology-Aware Multi-FPGA Partitioning — Report</title>
+<style>
+  @page { size: A4; margin: 16mm 16mm 16mm 16mm; }
+  body { font-family: "DejaVu Serif", "Times New Roman", serif; font-size: 10.2pt; line-height: 1.38; color: #111; }
+  h1 { font-size: 16pt; margin: 0 0 2px 0; }
+  .sub { color: #444; margin-bottom: 10px; }
+  h2 { font-size: 12.2pt; margin: 14px 0 4px 0; border-bottom: 1px solid #999; padding-bottom: 1px; }
+  h3 { font-size: 10.8pt; margin: 9px 0 3px 0; }
+  p { margin: 4px 0; text-align: justify; }
+  ul, ol { margin: 3px 0 3px 20px; padding: 0; }
+  li { margin: 1px 0; }
+  code, .mono { font-family: "DejaVu Sans Mono", monospace; font-size: 9pt; }
+  table { border-collapse: collapse; margin: 6px 0; font-size: 9.4pt; }
+  th, td { border: 1px solid #888; padding: 2px 7px; text-align: right; }
+  th { background: #eee; }
+  td.l, th.l { text-align: left; }
+  .eq { text-align: center; margin: 5px 0; font-style: italic; }
+  .box { border: 1px solid #bbb; background: #f7f7f7; padding: 5px 9px; margin: 6px 0; }
+  .small { font-size: 8.8pt; color: #333; }
+  .refs li { margin: 2px 0; }
+</style>
+</head>
+<body>
+
+<h1>Topology-Aware Multi-FPGA Partitioning</h1>
+<div class="sub">CS 516000 Programming Assignment — report</div>
+
+<h2>1. Overview</h2>
+<p>The partitioner assigns every node of a directed hypergraph to one of <i>K</i> FPGAs such that the total link
+cost (TLC) is minimised while the node capacities, the I/O limits and the link constraints (every sink FPGA of a
+signal must be directly linked to its source FPGA) are respected. The program is written in C++17 using only the
+standard library (including <code>std::thread</code>) and is built with <code>make</code>.</p>
+<p>The approach combines three ideas:</p>
+<ol>
+  <li><b>Multilevel partitioning</b> (in the style of hMETIS / KaHyPar [1,2]): the hypergraph is coarsened by
+  clustering, partitioned on the coarsest level, and projected back level by level with greedy refinement.</li>
+  <li><b>Multilevel simulated annealing</b> [3,4]: from the resulting partition a <i>partition-preserving</i>
+  hierarchy is built and every level, from the coarsest to the finest, is annealed. Moves on the coarse levels
+  move whole clusters, so the annealer can relocate entire communities between FPGAs, which single-node moves
+  cannot do.</li>
+  <li><b>Parallel multi-start</b>: up to four worker threads run independent attempts with different random seeds
+  and different annealing parameters; the best legal solution is written.</li>
+</ol>
+<p>All cost and constraint evaluations are exact and incremental, so a move is evaluated in time proportional to
+the number of nets incident to the moved node.</p>
+
+<h2>2. Objective and constraint handling</h2>
+<p>For a net <i>e</i> with weight <i>w(e)</i>, source FPGA <i>s</i> and set <i>O(e)</i> of FPGAs holding at least
+one sink, the cost is <i>w(e)·Σ<sub>f∈O(e)\{s}</sub> D(s,f)</i>, and if <i>O(e)\{s}</i> is non-empty the net uses
+<i>w(e)</i> I/O pins on <i>s</i> and on every FPGA of <i>O(e)\{s}</i>. The optimiser minimises</p>
+<div class="eq">J = Σ<sub>e</sub> w(e)·Σ<sub>f∈O(e)\{s}</sub> D(s,f) + λ·Σ<sub>f</sub> max(0, IO(f) − IOlimit(f))</div>
+<p>where <i>D(a,b)</i> is the link cost and, for an <b>unlinked</b> pair, a large penalty
+<i>B</i> = max(10000, 1000·max cost). λ = <i>B</i> as well. The constraints are therefore handled as follows:</p>
+<ul>
+  <li><b>Capacity</b> (both node types) is a <i>hard</i> constraint: a move is only applied if the target FPGA has
+  room; when it has not, the annealer tries a <i>swap</i> instead (Section 4.2).</li>
+  <li><b>Link and I/O</b> constraints are soft during optimisation with penalties that dominate every possible
+  saving in link cost, so local search removes violations first. Solutions are compared lexicographically by
+  <i>(signals over missing links + I/O overflow, TLC)</i>; hence a legal solution is always preferred.</li>
+  <li><b>Assignment</b>: every node receives exactly one FPGA by construction.</li>
+</ul>
+<p>Parsing removes sinks that equal the source of their net and duplicate sinks, since they can never change the
+cost or the I/O usage.</p>
+
+<h2>3. Data structures and incremental evaluation</h2>
+<p>The hypergraph is stored in CSR form: for every net its weight, source and sink list; for every node the list
+of incident nets. The partition state (<code>Refiner</code>) keeps, for each net, the number of sinks in every FPGA.
+Nets with at most 8 sinks use a sparse list of <i>(FPGA, count)</i> pairs (at most min(#sinks, K) entries), larger
+nets a dense array of size <i>K</i>; <i>|O(e)|</i> is kept explicitly. Additionally the state stores the I/O usage
+and the two loads of every FPGA, the current cost, the amount of signals over missing links and the total I/O
+overflow.</p>
+<p>Moving node <i>v</i> from FPGA <i>a</i> to <i>b</i> is evaluated net by net:</p>
+<ul>
+  <li><b>v is a sink</b> of <i>e</i> (source in <i>s</i>): <i>a</i> leaves <i>O(e)\{s}</i> iff its count drops
+  to 0 (and <i>a≠s</i>); <i>b</i> enters iff its count was 0 (and <i>b≠s</i>). The cost changes by
+  <i>w·(D(s,b) − D(s,a))</i> for the parts that apply; I/O changes by ±<i>w</i> on <i>a</i>, <i>b</i>, and on
+  <i>s</i> if the net switches between cut and uncut. O(1) work for dense nets.</li>
+  <li><b>v is the source</b> of <i>e</i>: sink counts are unchanged; the cost becomes
+  <i>w·Σ<sub>f∈O(e)</sub> D(b,f)</i> instead of <i>w·Σ<sub>f∈O(e)</sub> D(a,f)</i>, and the I/O usage of
+  <i>a</i>, <i>b</i> (and of <i>O(e)</i> if the net becomes cut/uncut) is updated. O(|O(e)|) work.</li>
+</ul>
+<p>The I/O deltas are accumulated in a small scratch array, from which the change of the overflow term is computed.
+The same template routine either only evaluates a move or also commits it, which guarantees that evaluation and
+update are consistent. A randomised test comparing the incremental state with a full recomputation after hundreds of
+thousands of random moves was used to validate it.</p>
+
+<h2>4. Algorithm</h2>
+<h3>4.1 Multilevel partitioning</h3>
+<p><b>Coarsening.</b> Nodes are visited in random order; an unclustered node <i>u</i> joins the neighbouring
+cluster <i>C</i> maximising the heavy-edge rating with weight penalty [2]
+<i>r(u,C) = Σ<sub>e∋u,C</sub> (w(e)/(|e|−1)) / (size(u)·size(C))</i>, where nets with more than 64 pins are ignored
+(e.g. clock-like nets with 594 167 sinks in public5). A cluster may contain at most 6 % of the smallest
+type-1 capacity and 6 % of the smallest type-2 capacity, which keeps the coarse problem packable. Contraction drops
+sinks that fall into the cluster of the source, merges duplicate sinks, removes empty nets and merges identical
+nets (same source and sink set) by adding their weights — this preserves both the TLC and the I/O usage of every
+partition exactly. Coarsening stops at 24·K nodes or when a level shrinks by less than 3 %.</p>
+<p><b>Initial partitioning.</b> On the coarsest level 12 candidates are created and the best is kept: (a) a
+topology-aware greedy growing — nodes are visited in BFS order and each is put into the FPGA with free capacity that
+minimises the link cost to its already placed neighbours (ties: most free capacity), which grows regions and puts
+spill-over into cheaply linked FPGAs; (b) random capacity-feasible assignments. Each candidate is improved by greedy
+K-way refinement trying every FPGA.</p>
+<p><b>Uncoarsening.</b> The partition is projected level by level; on each level greedy refinement passes are
+applied: boundary nodes (nodes with at least one cut incident net) are visited in random order and moved to the
+best capacity-feasible FPGA among those that contain their neighbours, if that strictly decreases <i>J</i>.</p>
+
+<h3>4.2 Multilevel simulated annealing</h3>
+<p>Greedy refinement gets stuck quickly, mainly because FPGAs become full. The main optimiser is therefore
+simulated annealing [3] embedded in a multilevel framework [4]:</p>
+<ol>
+  <li>From the current partition a new hierarchy is built with the restriction that only nodes of the same FPGA may
+  be clustered. Thus every level represents exactly the same partition, and the coarsest level has at most
+  <i>N<sub>top</sub></i> nodes (5000 by default; also n/3 and n/8 in other attempts, see 4.3).</li>
+  <li>Levels are annealed from coarsest to finest. The level <i>l</i> gets a share of the remaining time
+  proportional to <i>n<sub>l</sub><sup>−1</sup></i>, i.e. coarse levels get most of the time. The initial
+  temperature is <i>t<sub>0</sub> = τ·(mean positive Δ of random moves)</i> with <i>τ = τ<sub>top</sub></i> on the
+  coarsest level and <i>τ·0.05</i> per level below (hot on coarse levels, nearly greedy on fine levels); the
+  temperature decreases geometrically in time down to 0.05, after which a greedy pass finishes the level.</li>
+  <li><b>Moves.</b> A boundary node <i>v</i> is drawn uniformly (the boundary list is rebuilt about 100 times per
+  run). The target <i>b</i> is a random FPGA containing a neighbour of <i>v</i>; with probability 1/16 any
+  FPGA is chosen, so that empty or far FPGAs can also be populated. If <i>b</i> has no room for <i>v</i>, a
+  <b>swap</b> is attempted with a random boundary node <i>u</i> of <i>b</i> that fits into <i>a</i> (per-FPGA
+  boundary pools make this O(1)). The Metropolis rule is applied to the exact combined delta.</li>
+  <li>The best state (lexicographic key of Section 2) is tracked lazily: only the nodes moved since the last new best
+  are recorded, so saving a new best costs time proportional to the number of moves made since the previous one.</li>
+</ol>
+<p>Swap moves turned out to be essential: in public1 about 98 % of single moves are blocked by capacity, and adding
+swaps alone reduced the annealed TLC from 1377 to 238.</p>
+
+<h3>4.3 Parallel multi-start and time management</h3>
+<p>The default time budget is 250 s of the 300 s limit (minus a margin for output). <i>W</i> = min(4, #cores)
+worker threads (fewer for very large inputs, to bound memory) repeatedly run <i>attempts</i> = multilevel
+partitioning + multilevel annealing. The attempt length is max(3 s, 2 ms·N): small inputs (N = 600) get dozens of
+restarts per worker, inputs with ≥ 125 000 nodes a single long attempt. Attempts are diversified by
+τ<sub>top</sub> ∈ {2, 1, 4, 0.5} and by <i>N<sub>top</sub></i> ∈ {5000, n/3, n/8}: no single setting was best on all
+instances (e.g. public2 needs coarse-level annealing even though it has only 1600 nodes, whereas public1 is solved
+best without coarsening). Workers share only the best solution, protected by a mutex; the hypergraph is read-only.
+The program is deterministic apart from thread timing.</p>
+
+<h2>5. Results</h2>
+<p>Machine used for the experiments: 4-core Linux container, g++ 13.3, <code>-O3</code>. TLC values were verified
+with the provided checker (all solutions legal).</p>
+<!--RESULTS-->
+
+<h2>6. Complexity</h2>
+<p>Let <i>P</i> be the number of pins. Parsing, coarsening (one level) and contraction run in
+O(P log P) (sorting of sink lists and net hashes); memory is O(P + mK) in the worst case for the pin counters (only
+nets with more than 8 sinks use K counters). A move evaluation costs O(Σ<sub>e∋v</sub> c(e)) with c(e) = 1 for nets
+where <i>v</i> is a sink and c(e) = |O(e)| ≤ K where it is the source. Peak memory for the largest public instance is
+reported above and far below the 8 GB limit.</p>
+
+<h2>7. Build and usage</h2>
+<div class="box mono">make<br>./partitioner &lt;input_file&gt; &lt;output_file&gt; [time_limit_seconds]</div>
+<p class="small">Optional environment variables (for experiments only): <code>PARTITIONER_TIME_LIMIT</code> (default
+250), <code>PARTITIONER_THREADS</code>, <code>PARTITIONER_SEED</code>, <code>PARTITIONER_VERBOSE</code>. Source files:
+<code>hypergraph.*</code> (data structures, parser, contraction), <code>coarsen.cpp</code> (clustering),
+<code>initial.cpp</code> (initial partitioning, hierarchy, multilevel driver), <code>refiner.*</code> (incremental
+state, greedy refinement, simulated annealing), <code>main.cpp</code> (parallel multi-start), <code>util.hpp</code>
+(timer, random number generator).</p>
+
+<h2>References</h2>
+<ol class="refs small">
+  <li>G. Karypis, R. Aggarwal, V. Kumar, S. Shekhar. Multilevel hypergraph partitioning: applications in VLSI domain.
+  <i>IEEE Trans. VLSI Systems</i> 7(1), 1999.</li>
+  <li>S. Schlag, V. Henne, T. Heuer, H. Meyerhenke, P. Sanders, C. Schulz. k-way hypergraph partitioning via
+  n-level recursive bisection. <i>ALENEX</i> 2016 (heavy-edge rating with node-weight penalty, as used in KaHyPar).</li>
+  <li>S. Kirkpatrick, C. D. Gelatt, M. P. Vecchi. Optimization by simulated annealing. <i>Science</i> 220, 1983.</li>
+  <li>C. Walshaw. Multilevel refinement for combinatorial optimisation problems. <i>Annals of Operations Research</i>
+  131, 2004.</li>
+  <li>C. M. Fiduccia, R. M. Mattheyses. A linear-time heuristic for improving network partitions. <i>DAC</i> 1982
+  (gain-based move refinement).</li>
+  <li>D. Blackman, S. Vigna. Scrambled linear pseudorandom number generators. <i>ACM TOMS</i> 47(4), 2021
+  (xoshiro256** generator used for randomisation).</li>
+</ol>
+<p class="small">All code was written for this assignment; no external partitioning code or library is used.</p>
+</body>
+</html>

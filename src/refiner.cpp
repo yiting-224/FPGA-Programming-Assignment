@@ -467,10 +467,18 @@ void Refiner::anneal(Rng& rng, double deadline, const Timer& timer) {
             }
         }
         const int v = bnodes[rng.below((uint32_t)bnodes.size())];
-        collectCandidates(v, cands);
-        if (cands.empty()) continue;
-        const int b = cands[rng.below((uint32_t)cands.size())];
         const int a = part_[v];
+        int b;
+        if (randTargets_ && (rng.next() & 15) == 0 && T_.K > 1) {
+            // Occasionally try any FPGA, so that empty or far-away FPGAs
+            // (never neighbours of anything) can still be used.
+            b = (int)rng.below((uint32_t)(T_.K - 1));
+            if (b >= a) ++b;
+        } else {
+            collectCandidates(v, cands);
+            if (cands.empty()) continue;
+            b = cands[rng.below((uint32_t)cands.size())];
+        }
         if (!capacityOk(v, b)) {
             ++statBlocked_;
             // Swap move: find a boundary node u in b that can go to a.
