@@ -15,7 +15,8 @@
   li { margin: 1px 0; }
   code, .mono { font-family: "DejaVu Sans Mono", monospace; font-size: 9pt; }
   table { border-collapse: collapse; margin: 6px 0; font-size: 9.4pt; }
-  th, td { border: 1px solid #888; padding: 2px 7px; text-align: right; }
+  th, td { border: 1px solid #888; padding: 2px 6px; text-align: right; white-space: nowrap; }
+  td.l { white-space: normal; }
   th { background: #eee; }
   td.l, th.l { text-align: left; }
   .eq { text-align: center; margin: 5px 0; font-style: italic; }
@@ -144,12 +145,22 @@ restarts per worker, inputs with ≥ 125 000 nodes a single long attempt. Attemp
 τ<sub>top</sub> ∈ {2, 1, 4, 0.5} and by <i>N<sub>top</sub></i> ∈ {5000, n/3, n/8}: no single setting was best on all
 instances (e.g. public2 needs coarse-level annealing even though it has only 1600 nodes, whereas public1 is solved
 best without coarsening). Workers share only the best solution, protected by a mutex; the hypergraph is read-only.
-The program is deterministic apart from thread timing.</p>
+Because attempts are time-limited and run in parallel, results vary slightly between runs.</p>
 
 <h2>5. Results</h2>
 <p>Machine used for the experiments: 4-core Linux container, g++ 13.3, <code>-O3</code>. TLC values were verified
 with the provided checker (all solutions legal).</p>
-<!--RESULTS-->
+<table>
+<tr><th class="l">Case</th><th>N</th><th>K</th><th>M</th><th>L</th><th>Legal</th><th>TLC</th><th>Initial ML TLC</th><th>Wall time</th><th>Peak memory</th></tr>
+<tr><td class="l">public1</td><td>600</td><td>8</td><td>1 239</td><td>25</td><td>yes</td><td><b>175</b></td><td>2 368</td><td>248 s</td><td>13 MB</td></tr>
+<tr><td class="l">public2</td><td>1 600</td><td>4</td><td>2 157</td><td>6</td><td>yes</td><td><b>246</b></td><td>561</td><td>248 s</td><td>34 MB</td></tr>
+<tr><td class="l">public3</td><td>25 000</td><td>32</td><td>27 482</td><td>422</td><td>yes</td><td><b>8 654</b></td><td>18 211</td><td>248 s</td><td>29 MB</td></tr>
+<tr><td class="l">public4</td><td>40 000</td><td>32</td><td>45 504</td><td>418</td><td>yes</td><td><b>9 192</b></td><td>17 316</td><td>248 s</td><td>36 MB</td></tr>
+<tr><td class="l">public5</td><td>999 999</td><td>64</td><td>953 817</td><td>1 881</td><td>yes</td><td><b>42 184</b></td><td>93 949</td><td>247 s</td><td>684 MB</td></tr>
+</table>
+<p class="small">“Initial ML TLC” is the result of a single multilevel partitioning run with greedy refinement (phase 1
+of an attempt), shown for comparison. Default time budget (250 s), 4 threads. Because the search is randomised and
+multi-threaded, repeated runs differ by a few percent (e.g. public4: 8 783 and 9 192 in two full runs).</p>
 <h3>Development history (ablation)</h3>
 <p>The table shows how each component changed the result during development (single run, time limit in brackets;
 the numbers are indicative because the annealer is randomised).</p>
