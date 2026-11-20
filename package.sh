@@ -1,14 +1,14 @@
 #!/bin/bash
 # Builds the submission archive <student_id>.zip containing
 # Makefile, src/ and report.pdf (the executable is not included).
-# Usage: ./package.sh <student_id> [zh]
+# Usage: ./package.sh [student_id] [zh]   (student_id defaults to 115062556)
 #   zh: submit the Chinese report (report_zh.pdf) as report.pdf
 set -e
-if [ $# -lt 1 ] || [ $# -gt 2 ]; then
-    echo "usage: $0 <student_id> [zh]" >&2
+if [ $# -gt 2 ]; then
+    echo "usage: $0 [student_id] [zh]" >&2
     exit 1
 fi
-id="$1"
+id="${1:-115062556}"
 cd "$(dirname "$0")"
 rep=report.pdf
 [ "${2:-}" = "zh" ] && rep=report_zh.pdf

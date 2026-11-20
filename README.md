@@ -24,7 +24,8 @@ standard library is used (`std::thread` for parallel attempts, `-pthread`).
 | `report/report.html` | report source (`node report/render.js` renders `report.pdf`) |
 | `report.pdf` | report (English) |
 | `report/report_zh.html`, `report_zh.pdf` | report (Traditional Chinese); `node report/render.js report/report_zh.html report_zh.pdf` |
-| `package.sh` | `./package.sh <student_id> [zh]` creates `<student_id>.zip` (`zh`: Chinese report as `report.pdf`) |
+| `report/make_docx.js`, `report_zh.docx` | report (Traditional Chinese, Word); `node report/make_docx.js` |
+| `package.sh` | `./package.sh [student_id] [zh]` creates `<student_id>.zip` (default ID 115062556; `zh`: Chinese report as `report.pdf`) |
 | `checker`, `testcases.zip` | provided checker and public test cases |
 
 See `report.pdf` for the algorithm description and results.
